@@ -4,7 +4,7 @@ import bme280_float as bme
 import mlx90614
 import machine
 
-def cb(events):
+'''def callback(events):
     if events & SX1262.RX_DONE:
         msg, err = sx.recv()
         error = SX1262.STATUS[err]
@@ -15,12 +15,13 @@ def cb(events):
 sx = SX1262(spi_bus=1, clk=9, mosi=10, miso=11, cs=8, irq=14, rst=12, gpio=13)
 sx.begin(freq=868)
 
-sx.setBlockingCallback(False, cb)
+sx.setBlockingCallback(False, callback)'''
 
-i2c = machine.I2C(sda=machine.Pin(), scl=machine.Pin())
-bme_sensor = bme.BME280(i2c=i2c)
-other_sensor = mlx90614.MLX90614(i2c)
+i2cbme = machine.I2C(sda=machine.Pin(40), scl=machine.Pin(41))
+bme_sensor = bme.BME280(i2c=i2cbme)
+#other_sensor = mlx90614.MLX90614(i2c=i2c)
 
-while True:
-    sx.send(b'Ping')
-    time.sleep(10)
+
+bme_data = bme_sensor.read_compensated_data()
+print(bme_data)
+time.sleep(10)
