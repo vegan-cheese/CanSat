@@ -8,6 +8,9 @@ import sdcard
 import vfs
 import os
 
+# If others are using the same frequency as us, what should identify our messages from theirs
+identifier = "coyac"
+
 SCL_PIN = 20
 SDA_PIN = 19
 
@@ -18,8 +21,8 @@ MEASUREMENT_FREQ_SECONDS = 1
 SD_CARD_DIR = "/sd_card"
 
 # setup pins
-sx = SX1262(spi_bus=1, clk=9, mosi=10, miso=11, cs=8, irq=14, rst=12, gpio=13)
-sx.begin(freq=868)
+lora = SX1262(spi_bus=1, clk=9, mosi=10, miso=11, cs=8, irq=14, rst=12, gpio=13)
+lora.begin(freq=868)
 
 i2c = machine.I2C(sda=machine.Pin(SDA_PIN), scl=machine.Pin(SCL_PIN), freq=100_000)
 bme_sensor = bme.BME280(i2c=i2c)
@@ -37,26 +40,36 @@ os.mount(vfs, SD_CARD_DIR)
 sd_file = open(f"{SD_CARD_DIR}/output_data.txt", "w")
 
 
-def sx_callback(events):
+def on_lora_event(events):
     if events & SX1262.RX_DONE:
-        message, error = sx.recv()
-        resend(message.decode("utf-8"))
-        
+        message, error = lora.recv()
+        # Add more here
 
-sx.setBlockingCallback(False, sx_callback)
+lora.setBlockingCallback(False, on_lora_event)
 
 class CollectedData:
-    def __init__(self, timestamp, BME_reading, IR_reading, UV_reading) -> None:
+    def __init__(self, timestamp, bme_reading, ir_reading, uv_reading) -> None:
         self.timestamp = timestamp
-        self.temperature = BME_reading[0]
-        self.pressure = BME_reading[1] / 100
-        self.humidity = BME_reading[2]
-        self.IR = IR_reading
-        self.UV = UV_reading
-    
-    def get_csv_string(self) -> str:
+        self.temperature = bme_reading[0]
+        self.pressure = bme_reading[1] / 100
+        self.humidity = bme_reading[2]
+        self.ir = ir_reading
+        self.uv = uv_reading
+
+    def get_temp_string(self) -> str:
+        return f"{identifier}:d:t,{self.timestamp},{self.temperature}\n"
+    def get_pressure_string(self) -> str:
+        return f"{identifier}:d:p,{self.timestamp},{self.pressure}\n"
+    def get_humidity_string(self) -> str:
+        return f"{identifier}:d:h,{self.timestamp},{self.humidity}\n"
+    def get_ir_string(self) -> str:
+        return f"d:i{self.timestamp},{self.ir}\n"
+    def get_uv_string(self) -> str:
+        return f"{self.timestamp},{self.uv}\n"
+
+    def get_csv_data_strings(self) -> list[str]:
         return f"{self.timestamp},{self.temperature},{self.pressure},{self.humidity},{self.IR},{self.UV}\n"
-    
+
     def __str__(self) -> str:
         return f"Time: {self.timestamp}\nTemperature: {self.temperature}°C\nPressure: {self.pressure}hPa\nHumidity: {self.humidity}%RH\nIR: {self.IR}°C\nUV Index: {self.UV}"
 
@@ -77,7 +90,7 @@ while time.time() - start_time < RUNTIME_SECONDS:
     print("--------")
     
     # convert data to byte string and transmit
-    sx.send(data.get_csv_string().encode("utf-8"))
+    lora.send(data.get_csv_string().encode("utf-8"))
     
     # save data to SD card
     sd_file.write(data.get_csv_string())
