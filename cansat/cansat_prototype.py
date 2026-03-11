@@ -16,7 +16,7 @@ SDA_PIN = 19
 
 RUNTIME_SECONDS = 15
 
-MEASUREMENT_FREQ_SECONDS = 1
+MEASUREMENT_FREQ_SECONDS = 1.05
 
 SD_CARD_DIR = "/sd_card"
 
@@ -44,6 +44,20 @@ def on_lora_event(events):
     if events & SX1262.RX_DONE:
         message, error = lora.recv()
         # Add more here
+        message = message.decode()
+        error = SX1262.STATUS[error] 
+        if message.startswith("RESEND"):
+            target_timestamp = int(message.split(" ")[-1])
+            # Read from the SD Card
+            timestamp = -1
+            while timestamp != target_timestamp:
+                txt = sd_file.readline()
+                timestamp = txt.split(",")[0]
+
+            data = txt.split(",")[1:]
+            for i, val in enumerate(data):
+                data_type = ["t", "p", "h", "i", "u"][i]
+                lora.send(f"{identifier}:d:{data_type},{target_timestamp},{val}".encode())
 
 lora.setBlockingCallback(False, on_lora_event)
 
@@ -63,12 +77,12 @@ class CollectedData:
     def get_humidity_string(self) -> str:
         return f"{identifier}:d:h,{self.timestamp},{self.humidity}\n"
     def get_ir_string(self) -> str:
-        return f"d:i{self.timestamp},{self.ir}\n"
+        return f"{identifier}:d:i{self.timestamp},{self.ir}\n"
     def get_uv_string(self) -> str:
-        return f"{self.timestamp},{self.uv}\n"
+        return f"{identifier}:d:u,{self.timestamp},{self.uv}\n"
 
     def get_csv_data_strings(self) -> list[str]:
-        return f"{self.timestamp},{self.temperature},{self.pressure},{self.humidity},{self.IR},{self.UV}\n"
+        return [self.get_pressure_string(), self.get_pressure_string(), self.get_humidity_string(), self.get_ir_string(), self.get_uv_string()]
 
     def __str__(self) -> str:
         return f"Time: {self.timestamp}\nTemperature: {self.temperature}°C\nPressure: {self.pressure}hPa\nHumidity: {self.humidity}%RH\nIR: {self.IR}°C\nUV Index: {self.UV}"
@@ -78,11 +92,12 @@ def collect_data() -> CollectedData:
     timestamp = time.time()
     bme_data = bme_sensor.read_compensated_data()
     ir_data = ir_sensor.read_ambient_temp()
-    uv_data = uv_sensor.uv_index
-    
+    uv_data = uv_sensor.uv_indockingCallback(False, on_lora_event)
+
     return CollectedData(timestamp, bme_data, ir_data, uv_data)
 
 start_time = time.time()
+
 while time.time() - start_time < RUNTIME_SECONDS:
     data = collect_data()
     print("--------")
@@ -90,10 +105,17 @@ while time.time() - start_time < RUNTIME_SECONDS:
     print("--------")
     
     # convert data to byte string and transmit
-    lora.send(data.get_csv_string().encode("utf-8"))
+    #lora.send(data.get_csv_data_strings().encode("utf-8"))
+    data_strs = data.get_csv_data_strings()
+    for string in data_strs:
+        lora.send(string.encode())
     
     # save data to SD card
-    sd_file.write(data.get_csv_string())
+    write_str = f"{data.timestamp}"
+    for data_str in data_strs:
+        write_str += data_str.split(",")[-1]
+    write_str += "\n"
+    sd_file.write(write_str)
     time.sleep(MEASUREMENT_FREQ_SECONDS)
 
 sd_file.close()
