@@ -9,7 +9,7 @@ import vfs
 import os
 
 # If others are using the same frequency as us, what should identify our messages from theirs
-identifier = "coyac"
+IDENTIFIER = "coyac"
 
 # Pins to use for I2C components
 SCL_PIN = 48
@@ -60,24 +60,46 @@ def setup_pins() -> dict:
         "output_file" : sd_file
     }
 
-# def on_lora_event(events):
-#     if events & SX1262.RX_DONE:
-#         message, error = lora.recv()
-#         # Add more here
-#         message = message.decode()
-#         error = SX1262.STATUS[error]
-#         if message.startswith("RESEND"):
-#             target_timestamp = int(message.split(" ")[-1])
-#             # Read from the SD Card
-#             timestamp = -1
-#             while timestamp != target_timestamp:
-#                 txt = sd_file.readline()
-#                 timestamp = txt.split(",")[0]
-#
-#             data = txt.split(",")[1:]
-#             for i, val in enumerate(data):
-#                 data_type = ["t", "p", "h", "i", "u"][i]
-#                 lora.send(f"{identifier}:d:{data_type},{target_timestamp},{val}".encode())
+def on_resend_request(body_items):
+    data_type = body_items[0]
+    timestamp = body_items[1]
+
+    line = None
+    current_ts = None
+    while current_ts != timestamp:
+        line = sd_file.readline().split(",")
+        current_ts = line[0]
+
+    dt_map = {
+    "t": 1,
+    "p": 2,
+    "h": 3,
+    "i": 4,
+    "u": 5
+    }
+    lora.send(f"{IDENTIFIER},data:{data_type},{line[dt_map[data_type]]}".encode("utf-8"))
+
+def on_lora_event(events):
+    if events & SX1262.RX_DONE:
+        # Format the packet
+        packet, error = lora.recv()
+        packet = packet.decode("utf-8")
+        error = SX1262.STATUS[error]
+
+        # TODO: Check lengths of split lists and return nothing if incorrect
+
+        # Here is the format of the received string for data:
+        # coyac,data:[TYPE],[TIMESTAMP],[DATA]
+        split_packet = packet.split(":")
+        header_items = split_packet[0].split(",")
+        body_items = split_packet[1].split(",")
+
+        # This data was not transmitted by our CanSat
+        if header_items[0] != IDENTIFIER:
+            return
+
+        if header_items[1] == "resend":
+            on_resend_request(body_items)
 
 class CollectedData:
     def __init__(self, timestamp, bme_reading, ir_reading, uv_reading) -> None:
@@ -91,19 +113,19 @@ class CollectedData:
 
     # Returns csv strings for each piece of data to be sent in packets
     def get_temp_string(self) -> str:
-        return f"{identifier},data:t,{self.timestamp},{self.temperature}\n"
+        return f"{IDENTIFIER},data:t,{self.timestamp},{self.temperature}\n"
 
     def get_pressure_string(self) -> str:
-        return f"{identifier},data:p,{self.timestamp},{self.pressure}\n"
+        return f"{IDENTIFIER},data:p,{self.timestamp},{self.pressure}\n"
 
     def get_humidity_string(self) -> str:
-        return f"{identifier},data:h,{self.timestamp},{self.humidity}\n"
+        return f"{IDENTIFIER},data:h,{self.timestamp},{self.humidity}\n"
 
     def get_ir_string(self) -> str:
-        return f"{identifier},data:i,{self.timestamp},{self.ir}\n"
+        return f"{IDENTIFIER},data:i,{self.timestamp},{self.ir}\n"
 
     def get_uv_string(self) -> str:
-        return f"{identifier},data:u,{self.timestamp},{self.uv}\n"
+        return f"{IDENTIFIER},data:u,{self.timestamp},{self.uv}\n"
 
     # Just a list containing the returned strings of the above functions
     def get_csv_data_strings(self) -> list[str]:
