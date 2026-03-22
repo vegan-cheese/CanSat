@@ -11,33 +11,39 @@ import os
 # If others are using the same frequency as us, what should identify our messages from theirs
 identifier = "coyac"
 
-SCL_PIN = 20
-SDA_PIN = 19
+# Pins to use for I2C components
+SCL_PIN = 48
+SDA_PIN = 47
 
+# How long the program runs for
 RUNTIME_SECONDS = 15
 
+# The interval at which the CanSat takes measurements in seconds
 MEASUREMENT_FREQ_SECONDS = 1.05
 
+# The directory that the SD Card will be mounted to on the controller
 SD_CARD_DIR = "/sd_card"
 
-# setup pins
+# Initialise LoRa module
 lora = SX1262(spi_bus=1, clk=9, mosi=10, miso=11, cs=8, irq=14, rst=12, gpio=13)
 lora.begin(freq=868)
 
-i2c = machine.I2C(sda=machine.Pin(SDA_PIN), scl=machine.Pin(SCL_PIN), freq=100_000)
-bme_sensor = bme.BME280(i2c=i2c)
-ir_sensor = mlx90614.MLX90614(i2c=i2c)
-uv_sensor = veml6075.VEML6075(i2c=i2c)
+# Setup I2C pins and initialise sensors
+# Frequency must be 100kHz to allow the infrared sensor to work
+i2c_pins = machine.I2C(sda=machine.Pin(SDA_PIN), scl=machine.Pin(SCL_PIN), freq=100_000)
+bme_sensor = bme.BME280(i2c=i2c_pins)
+ir_sensor = mlx90614.MLX90614(i2c=i2c_pins)
+uv_sensor = veml6075.VEML6075(i2c=i2c_pins)
 
-spi = machine.SPI(2, sck=36, mosi=34, miso=33)
-cs = machine.Pin(47)
+# Setup SPI pins and initialise the SD Card reader
+spi_bus = machine.SPI(2, sck=36, mosi=34, miso=33)
+cs_pin = machine.Pin(47)
+sd_card = sdcard.SDCard(spi_bus, cs_pin)
 
-sd_card = sdcard.SDCard(spi, cs)
-
+# Mount the SD Card as a virtual filesystem and create the output file
 vfs=os.VfsFat(sd_card)
 os.mount(vfs, SD_CARD_DIR)
-
-sd_file = open(f"{SD_CARD_DIR}/output_data.txt", "w")
+sd_file = open(f"{SD_CARD_DIR}/output_data.csv", "w")
 
 
 def on_lora_event(events):

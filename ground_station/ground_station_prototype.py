@@ -2,81 +2,109 @@ from sx1262 import SX1262
 import time
 import machine
 
-class PartiallyReceivedData:
-    def __init__(self, waitTime, timestamp):
-        self.waitTime = waitTime
-        self.timestamp = timestamp
-        self.data = []
+IDENTIFIER = "coyac"
 
-cache: list[PartiallyReceivedData] = []
-fullyRecievedTimestamps: list[int] = []
+TIMEOUT_TIME = 3
+MAX_TIMEOUTS = 3
 
-identifier = "coyac"
+class PartialData:
+    def __init__(self, last_timeout_check):
+        self.last_timeout_check = last_timeout_check
+        self.timeout_count = 0
+        self.data = {}
 
-collected_data = {
-}
+# Timestamps that have been fully received already
+received_times: list[int] = []
 
-def deserialise_received_message(message: str):
-    # coyac:data,[TYPE],[TIMESTAMP],[DATA] 
-    if not message.startswith(identifier):
+# Dictionary mapping timestamps to data that has been partially received
+cache: dict[int, PartialData] = {}
+
+output_file = None
+
+def on_received_data(body_items):
+    # The body consists of measured data
+    data_type = body_items[0]
+    timestamp = body_items[1]
+    data = body_items[2]
+
+    # Data has already been fully received
+    if timestamp in received_times:
         return
 
-    split_str = message.split(",")
-    value = split_str[-1]
-    # Time, Value
-    return [split_str[-2], {value}]
+    # Data is partially received
+    if timestamp in cache.keys():
+        # This datatype has already been received for this timestamp
+        if data_type in cache[timestamp].data.keys():
+            return
+        else:
+            cache[timestamp].data[data_type] = data
 
-def get_packet_type(packet: str) -> str:
-    return packet.split(":")[-1][0]
+            # If adding this new bit of data has completed the data for the timestamp
+            if len(cache[timestamp].data.keys()) == 5:
+                # Order the data and write it to the file
+                completed_data = cache[timestamp].data
+                # TODO: Check if all keys are these letters
+                csv_str = f"{timestamp},{data["t"]},{data["p"]},{data["h"]},{data["i"]},{data["u"]}\n"
+                output_file.write(csv_str)
+                # Add to received times
+                received_times.append(timestamp)
+                # Remove from cache
+                cache.pop(timestamp)
+    # Data has not yet been received at all
+    else:
+        cache[timestamp] = PartialData(timestamp)
+        cache[timestamp].data[data_type] = data
 
+    for timestamp, partial_data in cache.values():
+        # If full set of data not received within TIMEOUT_TIME, request resends
+        if partial_data.last_timeout_check > timestamp + TIMEOUT_TIME:
+            # Set the new timeout counter to start from the current time
+            partial_data.last_timeout_check = timestamp
+            partial_data.timeout_count += 1
 
+            # If resend requests were sent more than 3 times with no outcome, delete the data for that timestamp
+            if partial_data.timeout_count <= MAX_TIMEOUTS:
+                # Resend requests for data that was not received
+                for dt in ["t", "p", "h", "i", "u"]:
+                    if not (dt in partial_data.data.keys()):
+                        lora.send(f"{identifier},resend:{dt},{timestamp}".encode())
+            else:
+                cache.pop(timestamp)
+
+# Callback function when the LoRa module receives a message
 def on_lora_event(events):
     if events & SX1262.RX_DONE:
+        # Format the packet
         packet, error = lora.recv()
         packet = packet.decode("utf-8")
         error = SX1262.STATUS[error]
-        packet_type = get_packet_type(packet)
-        ls = deserialise_received_message(packet)
-        if ls is None:
+
+        # TODO: Check lengths of split lists and return nothing if incorrect
+
+        # Here is the format of the received string for data:
+        # coyac,data:[TYPE],[TIMESTAMP],[DATA]
+        split_packet = packet.split(":")
+        header_items = split_packet[0].split(",")
+        body_items = split_packet[1].split(",")
+
+        # This data was not transmitted by our CanSat
+        if header_items[0] != IDENTIFIER:
             return
-        csv_file = open("data.csv", "a")
-        timestamp, data = ls
-        if timestamp not in collected_data.keys():
-            collected_data[timestamp] = [(packet_type, data)]
-            cache.append(PartiallyReceivedData(timestamp, timestamp))
-            cache[-1].data.append((packet_type, data))
 
-        else:
-            if len(collected_data[timestamp]) == 5:
-                return
-            collected_data[timestamp].append((packet_type, data))
-            if len(collected_data[timestamp]) == 5:
-                csv_ls = [timestamp]
-                for data_type in ["t", "p", "h", "i", "u"]:
-                    for data in collected_data[timestamp]:
-                        if data[0] == data_type:
-                            csv_ls.append(data[1])
-                            break
-                csv_file.write(",".join(csv_ls))
-                
-            for partial_data in cache:
-                if partial_data.timestamp == timestamp:
-                    partial_data.data.append((packet_type, data))
-                    if len(partial_data.data) == 5:
-                        cache.remove(partial_data)
-                    break
-        csv_file.close()
-        for partial_data in cache:
-            if partial_data.waitTime > 3 + timestamp:
-                lora.send(f"RESEND {partial_data.timestamp}".encode())
+        if header_items[1] == "data":
+            on_received_data(body_items)
 
-        print(packet)
+def main():
+    # Write the csv headers
+    output_file = open("data.csv", "a")
+    output_file.write("timestamp,temperature,pressure,humidity,infrared,ultraviolet\n")
 
-with open("data.csv", "w") as f:
-    f.write("timestamp,temperature,pressure,humidity,infrared,ultraviolet")
+    # Setup LoRa module pins
+    lora = SX1262(spi_bus=1, clk=9, mosi=10, miso=11, cs=8, irq=14, rst=12, gpio=13)
+    lora.begin(freq=868)
+    lora.setBlockingCallback(False, on_lora_event)
 
-lora = SX1262(spi_bus=1, clk=9, mosi=10, miso=11, cs=8, irq=14, rst=12, gpio=13)
+    #TODO: Maybe close the file?
 
-lora.begin(freq=868)
-
-lora.setBlockingCallback(False, on_lora_event)
+if __name__ == "__main__":
+    main()
