@@ -35,6 +35,8 @@ bme_sensor = bme.BME280(i2c=i2c_pins)
 ir_sensor = mlx90614.MLX90614(i2c=i2c_pins)
 uv_sensor = veml6075.VEML6075(i2c=i2c_pins)
 
+# ---- SD CARD ----
+
 # Setup SPI pins and initialise the SD Card reader
 spi_bus = machine.SPI(2, sck=36, mosi=34, miso=33)
 cs_pin = machine.Pin(47)
