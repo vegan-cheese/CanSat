@@ -7,6 +7,10 @@ import machine
 import sdcard
 import vfs
 import os
+import _thread
+
+v_control = machine.Pin(36, machine.Pin.OUT, machine.Pin.PULL_UP)
+v_control.value(0)
 
 # If others are using the same frequency as us, what should identify our messages from theirs
 IDENTIFIER = "coyac"
@@ -15,19 +19,30 @@ IDENTIFIER = "coyac"
 SCL_PIN = 48
 SDA_PIN = 47
 
-# How long the program runs for
-RUNTIME_SECONDS = 15
-
 # The interval at which the CanSat takes measurements in seconds
-MEASUREMENT_FREQ_SECONDS = 1.05
+MEASUREMENT_FREQ_SECONDS = 0.5
 
 # The directory that the SD Card will be mounted to on the controller
 SD_CARD_DIR = "/sd_card"
 
+FREQ_LIST = [
+    863,
+    864,
+    865,
+    866,
+    867,
+    868,
+    869,
+    870
+]
+current_freq_index = 0
+
+components = {}
+
 def setup_pins() -> dict:
     # Initialise LoRa module
     lora = SX1262(spi_bus=1, clk=9, mosi=10, miso=11, cs=8, irq=14, rst=12, gpio=13)
-    lora.begin(freq=868)
+    lora.begin(freq=FREQ_LIST[current_freq_index])
 
     # TODO: Set this up
     #lora.setBlockingCallback(False, on_lora_event)
@@ -42,8 +57,8 @@ def setup_pins() -> dict:
     # ---- SD CARD ----
 
     # Setup SPI pins and initialise the SD Card reader
-    spi_bus = machine.SPI(2, sck=36, mosi=34, miso=33)
-    cs_pin = machine.Pin(47)
+    spi_bus = machine.SPI(2, sck=6, mosi=5, miso=4)
+    cs_pin = machine.Pin(7)
     sd_card = sdcard.SDCard(spi_bus, cs_pin)
 
     # Mount the SD Card as a virtual filesystem and create the output file
@@ -51,45 +66,38 @@ def setup_pins() -> dict:
     os.mount(vfs, SD_CARD_DIR)
     sd_file = open(f"{SD_CARD_DIR}/output_data.csv", "w")
     sd_file.write("timestamp,temperature,pressure,humidity,infrared,ultraviolet\n")
+    sd_file.close()
+    
+    led = machine.Pin(35, machine.Pin.OUT)
+    button = machine.Pin(0, machine.Pin.IN, machine.Pin.PULL_UP)
 
     return {
         "lora" : lora,
         "bme_sensor" : bme_sensor,
         "ir_sensor" : ir_sensor,
         "uv_sensor" : uv_sensor,
-        "output_file" : sd_file
+        "led": led,
+        "button": button
     }
 
-def on_resend_request(body_items):
-    data_type = body_items[0]
-    timestamp = body_items[1]
-
-    line = None
-    current_ts = None
-    while current_ts != timestamp:
-        line = sd_file.readline().split(",")
-        current_ts = line[0]
-
-    dt_map = {
-    "t": 1,
-    "p": 2,
-    "h": 3,
-    "i": 4,
-    "u": 5
-    }
-    lora.send(f"{IDENTIFIER},data:{data_type},{line[dt_map[data_type]]}".encode("utf-8"))
+def change_frequency(freq):
+    components["lora"].setfrequency(freq)
+    # Send Confirmation
 
 def on_lora_event(events):
     if events & SX1262.RX_DONE:
         # Format the packet
-        packet, error = lora.recv()
-        packet = packet.decode("utf-8")
-        error = SX1262.STATUS[error]
+        try:
+            packet, error = lora.recv()
+            packet = packet.decode("utf-8")
+            error = SX1262.STATUS[error]
+        except:
+            print("Failed to receive packet!")
+            return
 
         # TODO: Check lengths of split lists and return nothing if incorrect
 
         # Here is the format of the received string for data:
-        # coyac,data:[TYPE],[TIMESTAMP],[DATA]
         split_packet = packet.split(":")
         header_items = split_packet[0].split(",")
         body_items = split_packet[1].split(",")
@@ -97,9 +105,14 @@ def on_lora_event(events):
         # This data was not transmitted by our CanSat
         if header_items[0] != IDENTIFIER:
             return
-
-        if header_items[1] == "resend":
-            on_resend_request(body_items)
+        
+        if header_items[1] == "change":
+            #Change frequency
+            change_frequency(body_items)
+            
+        elif header_items[1] == "resend":
+            # Resend Data
+            pass
 
 class CollectedData:
     def __init__(self, timestamp, bme_reading, ir_reading, uv_reading) -> None:
@@ -130,45 +143,88 @@ class CollectedData:
     # Just a list containing the returned strings of the above functions
     def get_csv_data_strings(self) -> list[str]:
         return [self.get_pressure_string(), self.get_pressure_string(), self.get_humidity_string(), self.get_ir_string(), self.get_uv_string()]
+    
+    def get_csv_string(self) -> str:
+        return f"{IDENTIFIER},data:{self.timestamp},{self.temperature},{self.pressure},{self.humidity},{self.ir},{self.uv}\n"
 
     # For debug, to print the data to the console
     def __str__(self) -> str:
-        return f"Time: {self.timestamp}\nTemperature: {self.temperature}°C\nPressure: {self.pressure}hPa\nHumidity: {self.humidity}%RH\nIR: {self.IR}°C\nUV Index: {self.UV}"
+        return f"Time: {self.timestamp}\nTemperature: {self.temperature}°C\nPressure: {self.pressure}hPa\nHumidity: {self.humidity}%RH\nIR: {self.ir}°C\nUV Index: {self.uv}"
 
 # Returns a class containing data collected from each sensor
-def collect_data(components: dict) -> CollectedData:
-    timestamp = time.time()
+def collect_data(components: dict, start_time) -> CollectedData:
+    timestamp = (time.time_ns() - start_time) // 10000
     bme_data = components["bme_sensor"].read_compensated_data()
     ir_data = components["ir_sensor"].read_ambient_temp()
     uv_data = components["uv_sensor"].uv_index
 
     return CollectedData(timestamp, bme_data, ir_data, uv_data)
 
+def transmit_data(components, data_strs):
+    for string in data_strs:
+            components["lora"].send(string.encode("utf-8"))
+            print(string)
+
+def flash_led(count, components):
+    for i in range(count):
+        components["led"].value(1)
+        time.sleep(0.2)
+        components["led"].value(0)
+        time.sleep(0.2)
 
 def main():
+    global current_freq_index, components
     # Initialises all components and stores them in a dictionary
     components = setup_pins()
 
-    start_time = time.time()
+    start_time = time.time_ns()
+    prev_button_state = components["button"].value()
 
-    while time.time() - start_time < RUNTIME_SECONDS:
-        data = collect_data(components)
+    while True:
+        
+        new_button_state = components["button"].value()
+        if new_button_state != prev_button_state and new_button_state == 1:
+            current_freq_index += 1
+            if current_freq_index >= len(FREQ_LIST):
+                current_freq_index = 0
+            print(f"Changing frequency to {FREQ_LIST[current_freq_index]} MHz")
+            _thread.start_new_thread(flash_led, [current_freq_index + 1, components])
+            try:
+                #components["lora"].setFrequency(FREQ_LIST[current_freq_index])
+                pass
+            except:
+                print("Failed to change frequency!")
+                current_freq_index -= 1
+                if current_freq_index < 0:
+                    current_freq_index = len(FREQ_LIST) - 1
+            # components["lora"].setBlockingCallback(False, on_lora_event)
+        prev_button_state = new_button_state
+        
+        try:
+            data = collect_data(components, start_time)
+        except:
+            print("Failed to read sensors!")
+            data = CollectedData(time.time_ns(), -1, [-1, -1, -1], -1, -1)
+
         print("--------")
-        print(data)
-        print("--------")
+        print(data.get_csv_string())
 
         # Encode each packet and transmit to the ground
-        data_strs = data.get_csv_data_strings()
-        for string in data_strs:
-            lora.send(string.encode())
+        # = data.get_csv_data_strings()
+        #_thread.start_new_thread(transmit_data, (components, data_strs))
+        components["lora"].send(data.get_csv_string().encode())
 
         # Save data to SD card
-        sd_file.write(f"{data.timestamp},{data.temperature},{data.pressure},{data.humidity},{data.ir},{data.uv}\n")
+        try:
+            with open(f"{SD_CARD_DIR}/output_data.csv", "a") as f:
+                f.write(f"{data.timestamp},{data.temperature},{data.pressure},{data.humidity},{data.ir},{data.uv}\n")
+        except:
+            print("Failed to write data to SD Card!")
 
         # Wait until the next measurement should be taken
         time.sleep(MEASUREMENT_FREQ_SECONDS)
 
-    sd_file.close()
+    #components["output_file"].close()
 
 if __name__ == "__main__":
     main()

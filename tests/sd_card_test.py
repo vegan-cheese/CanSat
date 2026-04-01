@@ -5,8 +5,8 @@ import os
 
 SD_CARD_DIR = "/sd_card"
 
-spi = machine.SPI(2, sck=36, mosi=34, miso=33)
-cs = machine.Pin(47)
+spi = machine.SPI(2, sck=6, mosi=5, miso=4)
+cs = machine.Pin(7)
 
 sd_card = sdcard.SDCard(spi, cs)
 
